@@ -25,6 +25,7 @@ const pool = new Pool({
 
 // Middleware
 const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
+console.log(`🌐 CORS configured for frontend: ${frontendUrl}`);
 app.use(cors({
   origin: frontendUrl,
   credentials: true
