@@ -379,8 +379,13 @@ const createTables = async () => {
   }
 };
 
-// Kill processes on port 5000 (Windows)
+// Kill processes on port (Windows only - skip on Linux/Production)
 const killPortProcesses = async (port = 5000) => {
+  // Skip on non-Windows systems (Linux, macOS, Production)
+  if (process.platform !== 'win32' || process.env.NODE_ENV === 'production') {
+    return;
+  }
+  
   try {
     console.log(`🔍 Checking for processes on port ${port}...`);
     
@@ -475,12 +480,18 @@ const startServer = async () => {
       await createTables();
       // Initialize admin user
       await initializeAdmin();
+    } else {
+      // In production, log warning but continue (database might be temporarily unavailable)
+      if (process.env.NODE_ENV === 'production') {
+        console.warn('⚠️  Database connection failed, but server will start anyway');
+      }
     }
     
-    // Start server
-    app.listen(PORT, () => {
+    // Start server - listen on 0.0.0.0 for Render/production
+    const host = process.env.NODE_ENV === 'production' ? '0.0.0.0' : 'localhost';
+    app.listen(PORT, host, () => {
       console.log(`🚀 Server is running on port ${PORT}`);
-      console.log(`🌐 Frontend URL: http://localhost:3000`);
+      console.log(`🌐 Frontend URL: ${frontendUrl}`);
       console.log(`🗄️  Database: ${dbConnected ? 'Connected' : 'Disconnected'}`);
       console.log('=====================================');
       console.log('📡 API Endpoints:');
