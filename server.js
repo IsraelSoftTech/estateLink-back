@@ -1,3 +1,5 @@
+require('dotenv').config();
+
 const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
@@ -468,9 +470,15 @@ const startServer = async () => {
   try {
     console.log('🚀 Starting estateLink Backend Server...');
     console.log('=====================================');
+    console.log(`🔧 Environment: ${process.env.NODE_ENV || 'development'}`);
+    console.log(`🌐 PORT: ${PORT}`);
+    console.log(`🔗 DATABASE_URL: ${process.env.DATABASE_URL ? 'Set' : 'Not set'}`);
+    console.log(`🌍 FRONTEND_URL: ${frontendUrl}`);
     
-    // Kill any existing processes on port 5000
-    await killPortProcesses(PORT);
+    // Kill any existing processes on port 5000 (skip in production/Render)
+    if (process.env.NODE_ENV !== 'production' && !process.env.RENDER) {
+      await killPortProcesses(PORT);
+    }
     
     // Test database connection
     const dbConnected = await testDbConnection();
@@ -488,11 +496,14 @@ const startServer = async () => {
     }
     
     // Start server - listen on 0.0.0.0 for Render/production
-    const host = process.env.NODE_ENV === 'production' ? '0.0.0.0' : 'localhost';
-    app.listen(PORT, host, () => {
-      console.log(`🚀 Server is running on port ${PORT}`);
+    // Render requires binding to 0.0.0.0, not localhost
+    // If PORT is set by environment (like Render does), bind to 0.0.0.0
+    const host = (process.env.NODE_ENV === 'production' || process.env.RENDER || process.env.PORT) ? '0.0.0.0' : 'localhost';
+    const server = app.listen(PORT, host, () => {
+      console.log(`🚀 Server is running on ${host}:${PORT}`);
       console.log(`🌐 Frontend URL: ${frontendUrl}`);
       console.log(`🗄️  Database: ${dbConnected ? 'Connected' : 'Disconnected'}`);
+      console.log(`🔧 NODE_ENV: ${process.env.NODE_ENV || 'not set'}`);
       console.log('=====================================');
       console.log('📡 API Endpoints:');
       console.log('   POST /api/auth/register - Register new user');
@@ -500,6 +511,17 @@ const startServer = async () => {
       console.log('   GET  /api/auth/profile  - Get user profile');
       console.log('   GET  /api/health       - Health check');
       console.log('   GET  /api/test         - Test endpoint');
+    });
+    
+    // Handle server errors
+    server.on('error', (error) => {
+      if (error.code === 'EADDRINUSE') {
+        console.error(`❌ Port ${PORT} is already in use`);
+        process.exit(1);
+      } else {
+        console.error('❌ Server error:', error);
+        process.exit(1);
+      }
     });
     
   } catch (error) {
