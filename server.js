@@ -12,16 +12,19 @@ const app = express();
 const PORT = process.env.PORT || 5000;
 
 // Database connection
+const databaseUrl = process.env.DATABASE_URL || 'postgresql://estatelink_user:A5H0dOIq8FpjzQVF1L0h9K0z5ipp8wLt@dpg-d4mn1g9r0fns73abb7a0-a.oregon-postgres.render.com/estatelink';
+
 const pool = new Pool({
-  connectionString: 'postgresql://estatelink_user:A5H0dOIq8FpjzQVF1L0h9K0z5ipp8wLt@dpg-d4mn1g9r0fns73abb7a0-a.oregon-postgres.render.com/estatelink',
+  connectionString: databaseUrl,
   ssl: {
     rejectUnauthorized: false
   }
 });
 
 // Middleware
+const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
 app.use(cors({
-  origin: 'http://localhost:3000',
+  origin: frontendUrl,
   credentials: true
 }));
 app.use(express.json());
