@@ -268,11 +268,24 @@ app.get('/api/auth/profile', async (req, res) => {
 app.get('/api/users', async (req, res) => {
   try {
     const { accountType } = req.query;
+    console.log('📋 Get users request:', { accountType, query: req.query });
+    
+    // Test database connection first
+    try {
+      await pool.query('SELECT 1');
+    } catch (dbError) {
+      console.error('❌ Database connection test failed:', dbError);
+      return res.status(500).json({
+        success: false,
+        message: 'Database connection failed',
+        error: dbError.message
+      });
+    }
     
     let query = 'SELECT "id", "username", "fullName", "email", "phoneNumber", "accountType", "isActive", "lastLogin", "createdAt" FROM "Users"';
     const params = [];
     
-    if (accountType) {
+    if (accountType && accountType !== 'undefined' && accountType !== 'null') {
       // Map frontend account type names to database values
       const accountTypeMap = {
         'Landlords': 'landlord',
@@ -282,6 +295,8 @@ app.get('/api/users', async (req, res) => {
       };
       
       const dbAccountType = accountTypeMap[accountType] || accountType.toLowerCase();
+      console.log(`🔍 Mapping "${accountType}" to database type: "${dbAccountType}"`);
+      
       query += ' WHERE "accountType" = $1';
       params.push(dbAccountType);
       
@@ -294,7 +309,12 @@ app.get('/api/users', async (req, res) => {
     
     query += ' ORDER BY "createdAt" DESC';
     
+    console.log('📊 Executing query:', query);
+    console.log('📊 Query params:', params);
+    
     const result = await pool.query(query, params);
+    
+    console.log(`✅ Found ${result.rows.length} users`);
     
     res.json({
       success: true,
@@ -304,10 +324,18 @@ app.get('/api/users', async (req, res) => {
     
   } catch (error) {
     console.error('❌ Get users error:', error);
+    console.error('❌ Error details:', {
+      message: error.message,
+      code: error.code,
+      detail: error.detail,
+      hint: error.hint,
+      stack: error.stack
+    });
     res.status(500).json({
       success: false,
       message: 'Failed to get users',
-      error: error.message
+      error: error.message,
+      details: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
   }
 });
