@@ -26,9 +26,36 @@ const pool = new Pool({
 // Middleware
 const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:3000';
 console.log(`🌐 CORS configured for frontend: ${frontendUrl}`);
+
+// CORS configuration - more flexible for development
 app.use(cors({
-  origin: frontendUrl,
-  credentials: true
+  origin: function (origin, callback) {
+    // Allow requests with no origin (like mobile apps, Postman, or same-origin requests)
+    if (!origin) {
+      return callback(null, true);
+    }
+    
+    // Allow requests from the configured frontend URL
+    if (origin === frontendUrl || origin === process.env.FRONTEND_URL) {
+      return callback(null, true);
+    }
+    
+    // In development, allow localhost on any port
+    if (process.env.NODE_ENV !== 'production') {
+      const localhostRegex = /^https?:\/\/localhost(:\d+)?$/;
+      const localhostIPRegex = /^https?:\/\/(127\.0\.0\.1|192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+)(:\d+)?$/;
+      
+      if (localhostRegex.test(origin) || localhostIPRegex.test(origin)) {
+        return callback(null, true);
+      }
+    }
+    
+    // Reject other origins
+    callback(new Error('Not allowed by CORS'));
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
 }));
 app.use(express.json());
 
@@ -230,6 +257,208 @@ app.get('/api/auth/profile', async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Failed to get profile',
+      error: error.message
+    });
+  }
+});
+
+// USER MANAGEMENT ROUTES
+
+// Get all users by account type
+app.get('/api/users', async (req, res) => {
+  try {
+    const { accountType } = req.query;
+    
+    let query = 'SELECT "id", "username", "fullName", "email", "phoneNumber", "accountType", "isActive", "lastLogin", "createdAt" FROM "Users"';
+    const params = [];
+    
+    if (accountType) {
+      // Map frontend account type names to database values
+      const accountTypeMap = {
+        'Landlords': 'landlord',
+        'Tenants/Buyers': 'tenant',
+        'Technicians': 'technician',
+        'Council Officials': 'admin' // Council officials are stored as admin type
+      };
+      
+      const dbAccountType = accountTypeMap[accountType] || accountType.toLowerCase();
+      query += ' WHERE "accountType" = $1';
+      params.push(dbAccountType);
+      
+      // Exclude default_admin from Council Officials
+      if (accountType === 'Council Officials') {
+        query += ' AND "username" != $2';
+        params.push('default_admin');
+      }
+    }
+    
+    query += ' ORDER BY "createdAt" DESC';
+    
+    const result = await pool.query(query, params);
+    
+    res.json({
+      success: true,
+      data: result.rows,
+      count: result.rows.length
+    });
+    
+  } catch (error) {
+    console.error('❌ Get users error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get users',
+      error: error.message
+    });
+  }
+});
+
+// Update user
+app.put('/api/users/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { fullName, email, phoneNumber, accountType } = req.body;
+    
+    const updates = [];
+    const values = [];
+    let paramCount = 1;
+    
+    if (fullName !== undefined) {
+      updates.push(`"fullName" = $${paramCount++}`);
+      values.push(fullName);
+    }
+    if (email !== undefined) {
+      updates.push(`"email" = $${paramCount++}`);
+      values.push(email);
+    }
+    if (phoneNumber !== undefined) {
+      updates.push(`"phoneNumber" = $${paramCount++}`);
+      values.push(phoneNumber);
+    }
+    if (accountType !== undefined) {
+      updates.push(`"accountType" = $${paramCount++}`);
+      values.push(accountType);
+    }
+    
+    if (updates.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'No fields to update'
+      });
+    }
+    
+    updates.push(`"updatedAt" = CURRENT_TIMESTAMP`);
+    values.push(id);
+    
+    const query = `
+      UPDATE "Users" 
+      SET ${updates.join(', ')}
+      WHERE "id" = $${paramCount}
+      RETURNING "id", "username", "fullName", "email", "phoneNumber", "accountType", "isActive", "lastLogin", "createdAt"
+    `;
+    
+    const result = await pool.query(query, values);
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+    
+    console.log('✅ User updated:', id);
+    
+    res.json({
+      success: true,
+      message: 'User updated successfully',
+      data: result.rows[0]
+    });
+    
+  } catch (error) {
+    console.error('❌ Update user error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to update user',
+      error: error.message
+    });
+  }
+});
+
+// Delete user
+app.delete('/api/users/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    // Check if user exists
+    const checkResult = await pool.query('SELECT "id", "username" FROM "Users" WHERE "id" = $1', [id]);
+    
+    if (checkResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+    
+    // Delete user
+    await pool.query('DELETE FROM "Users" WHERE "id" = $1', [id]);
+    
+    console.log('✅ User deleted:', id);
+    
+    res.json({
+      success: true,
+      message: 'User deleted successfully'
+    });
+    
+  } catch (error) {
+    console.error('❌ Delete user error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to delete user',
+      error: error.message
+    });
+  }
+});
+
+// Suspend/Activate user
+app.patch('/api/users/:id/status', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { isActive } = req.body;
+    
+    if (typeof isActive !== 'boolean') {
+      return res.status(400).json({
+        success: false,
+        message: 'isActive must be a boolean value'
+      });
+    }
+    
+    const result = await pool.query(
+      `UPDATE "Users" 
+       SET "isActive" = $1, "updatedAt" = CURRENT_TIMESTAMP 
+       WHERE "id" = $2 
+       RETURNING "id", "username", "fullName", "email", "phoneNumber", "accountType", "isActive", "lastLogin", "createdAt"`,
+      [isActive, id]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+    
+    console.log(`✅ User ${isActive ? 'activated' : 'suspended'}:`, id);
+    
+    res.json({
+      success: true,
+      message: `User ${isActive ? 'activated' : 'suspended'} successfully`,
+      data: result.rows[0]
+    });
+    
+  } catch (error) {
+    console.error('❌ Update user status error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to update user status',
       error: error.message
     });
   }
