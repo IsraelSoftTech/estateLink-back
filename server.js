@@ -57,7 +57,9 @@ app.use(cors({
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
 }));
-app.use(express.json());
+// Increase body size limit to handle file uploads (50MB)
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 // Request logging
 app.use((req, res, next) => {
@@ -492,6 +494,428 @@ app.patch('/api/users/:id/status', async (req, res) => {
   }
 });
 
+// PROPERTY MANAGEMENT ROUTES
+
+// Create property
+app.post('/api/properties', async (req, res) => {
+  try {
+    console.log('📝 Property creation request:', req.body);
+    const { landlordId, title, description, location, price, propertyType, bedrooms, bathrooms, area, picture, video, verificationDocument } = req.body;
+
+    // Validation
+    if (!landlordId || !title || !location || !price) {
+      return res.status(400).json({
+        success: false,
+        message: 'Landlord ID, title, location, and price are required'
+      });
+    }
+
+    // Create property
+    const result = await pool.query(
+      `INSERT INTO "Properties" ("landlordId", "title", "description", "location", "price", "propertyType", "bedrooms", "bathrooms", "area", "picture", "video", "verificationDocument", "status", "paymentStatus", "createdAt", "updatedAt") 
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'pending', 'pending', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) 
+       RETURNING *`,
+      [landlordId, title, description || null, location, price, propertyType || null, bedrooms || null, bathrooms || null, area || null, picture || null, video || null, verificationDocument || null]
+    );
+
+    console.log('✅ Property created successfully:', result.rows[0].id);
+    
+    res.status(201).json({
+      success: true,
+      message: 'Property created successfully',
+      data: result.rows[0]
+    });
+
+  } catch (error) {
+    console.error('❌ Property creation error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Property creation failed',
+      error: error.message
+    });
+  }
+});
+
+// Get all properties (for admin)
+app.get('/api/properties', async (req, res) => {
+  try {
+    const { landlordId, status } = req.query;
+    
+    // Check if Properties table exists, if not return empty array
+    try {
+      await pool.query('SELECT 1 FROM "Properties" LIMIT 1');
+    } catch (tableError) {
+      // Table doesn't exist, return empty array
+      console.log('⚠️ Properties table does not exist yet, returning empty array');
+      return res.json({
+        success: true,
+        data: [],
+        count: 0
+      });
+    }
+    
+    // Check if Properties.landlordId is UUID or INTEGER to handle parameter correctly
+    let landlordIdType = 'INTEGER';
+    try {
+      const colTypeResult = await pool.query(`
+        SELECT data_type 
+        FROM information_schema.columns 
+        WHERE table_name = 'Properties' AND column_name = 'landlordId'
+      `);
+      if (colTypeResult.rows.length > 0) {
+        landlordIdType = colTypeResult.rows[0].data_type === 'uuid' ? 'UUID' : 'INTEGER';
+      }
+    } catch (checkError) {
+      console.warn('⚠️ Could not check Properties landlordId type:', checkError.message);
+    }
+    
+    // Use LEFT JOIN to handle cases where there might be orphaned properties
+    let query = `
+      SELECT p.*, u."username", u."fullName", u."email" 
+      FROM "Properties" p
+      LEFT JOIN "Users" u ON p."landlordId" = u."id"
+    `;
+    const params = [];
+    const conditions = [];
+    
+    if (landlordId) {
+      if (landlordIdType === 'UUID') {
+        // If UUID type, check if the value is a valid UUID format
+        // If it's a numeric string, we can't use it directly with UUID
+        // We need to query by casting or find another way
+        const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+        if (uuidRegex.test(landlordId)) {
+          conditions.push(`p."landlordId" = $${params.length + 1}`);
+          params.push(landlordId);
+        } else {
+          // If it's not a valid UUID format, it might be an INTEGER
+          // We can't directly match INTEGER to UUID, so we'll skip this filter
+          // or convert it - but since UUIDs are not sequential, we can't convert
+          console.warn(`⚠️ landlordId "${landlordId}" is not a valid UUID format, skipping filter`);
+        }
+      } else {
+        // INTEGER type
+        conditions.push(`p."landlordId" = $${params.length + 1}`);
+        params.push(parseInt(landlordId));
+      }
+    }
+    
+    if (status) {
+      conditions.push(`p."status" = $${params.length + 1}`);
+      params.push(status);
+    }
+    
+    if (conditions.length > 0) {
+      query += ' WHERE ' + conditions.join(' AND ');
+    }
+    
+    query += ' ORDER BY p."createdAt" DESC';
+    
+    console.log('📊 Executing query:', query);
+    console.log('📊 Query params:', params);
+    console.log('📊 Landlord ID type:', landlordIdType);
+    
+    const result = await pool.query(query, params);
+    
+    res.json({
+      success: true,
+      data: result.rows,
+      count: result.rows.length
+    });
+    
+  } catch (error) {
+    console.error('❌ Get properties error:', error);
+    console.error('❌ Error details:', {
+      message: error.message,
+      code: error.code,
+      detail: error.detail,
+      hint: error.hint
+    });
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get properties',
+      error: error.message,
+      details: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
+  }
+});
+
+// Get property by ID
+app.get('/api/properties/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    const result = await pool.query(
+      `SELECT p.*, u."username", u."fullName", u."email" 
+       FROM "Properties" p
+       JOIN "Users" u ON p."landlordId" = u."id"
+       WHERE p."id" = $1`,
+      [id]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Property not found'
+      });
+    }
+    
+    res.json({
+      success: true,
+      data: result.rows[0]
+    });
+    
+  } catch (error) {
+    console.error('❌ Get property error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get property',
+      error: error.message
+    });
+  }
+});
+
+// Update property
+app.put('/api/properties/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { title, description, location, price, propertyType, bedrooms, bathrooms, area, picture, video, verificationDocument } = req.body;
+    
+    const updates = [];
+    const values = [];
+    let paramCount = 1;
+    
+    if (title !== undefined) {
+      updates.push(`"title" = $${paramCount++}`);
+      values.push(title);
+    }
+    if (description !== undefined) {
+      updates.push(`"description" = $${paramCount++}`);
+      values.push(description);
+    }
+    if (location !== undefined) {
+      updates.push(`"location" = $${paramCount++}`);
+      values.push(location);
+    }
+    if (price !== undefined) {
+      updates.push(`"price" = $${paramCount++}`);
+      values.push(price);
+    }
+    if (propertyType !== undefined) {
+      updates.push(`"propertyType" = $${paramCount++}`);
+      values.push(propertyType);
+    }
+    if (bedrooms !== undefined) {
+      updates.push(`"bedrooms" = $${paramCount++}`);
+      values.push(bedrooms);
+    }
+    if (bathrooms !== undefined) {
+      updates.push(`"bathrooms" = $${paramCount++}`);
+      values.push(bathrooms);
+    }
+    if (area !== undefined) {
+      updates.push(`"area" = $${paramCount++}`);
+      values.push(area);
+    }
+    if (picture !== undefined) {
+      updates.push(`"picture" = $${paramCount++}`);
+      values.push(picture);
+    }
+    if (video !== undefined) {
+      updates.push(`"video" = $${paramCount++}`);
+      values.push(video);
+    }
+    if (verificationDocument !== undefined) {
+      updates.push(`"verificationDocument" = $${paramCount++}`);
+      values.push(verificationDocument);
+    }
+    
+    if (updates.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'No fields to update'
+      });
+    }
+    
+    updates.push(`"updatedAt" = CURRENT_TIMESTAMP`);
+    values.push(id);
+    
+    const query = `
+      UPDATE "Properties" 
+      SET ${updates.join(', ')}
+      WHERE "id" = $${paramCount}
+      RETURNING *
+    `;
+    
+    const result = await pool.query(query, values);
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Property not found'
+      });
+    }
+    
+    console.log('✅ Property updated:', id);
+    
+    res.json({
+      success: true,
+      message: 'Property updated successfully',
+      data: result.rows[0]
+    });
+    
+  } catch (error) {
+    console.error('❌ Update property error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to update property',
+      error: error.message
+    });
+  }
+});
+
+// Delete property
+app.delete('/api/properties/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    // Check if property exists
+    const checkResult = await pool.query('SELECT "id", "status" FROM "Properties" WHERE "id" = $1', [id]);
+    
+    if (checkResult.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Property not found'
+      });
+    }
+    
+    // Only allow deletion if status is pending
+    if (checkResult.rows[0].status !== 'pending') {
+      return res.status(400).json({
+        success: false,
+        message: 'Cannot delete property that is not pending'
+      });
+    }
+    
+    // Delete property
+    await pool.query('DELETE FROM "Properties" WHERE "id" = $1', [id]);
+    
+    console.log('✅ Property deleted:', id);
+    
+    res.json({
+      success: true,
+      message: 'Property deleted successfully'
+    });
+    
+  } catch (error) {
+    console.error('❌ Delete property error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to delete property',
+      error: error.message
+    });
+  }
+});
+
+// Forward property to council
+app.patch('/api/properties/:id/forward-to-council', async (req, res) => {
+  try {
+    const { id } = req.params;
+    
+    const result = await pool.query(
+      `UPDATE "Properties" 
+       SET "status" = 'forwarded_to_council', "updatedAt" = CURRENT_TIMESTAMP 
+       WHERE "id" = $1 
+       RETURNING *`,
+      [id]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Property not found'
+      });
+    }
+    
+    console.log('✅ Property forwarded to council:', id);
+    
+    res.json({
+      success: true,
+      message: 'Property forwarded to council successfully',
+      data: result.rows[0]
+    });
+    
+  } catch (error) {
+    console.error('❌ Forward property error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to forward property',
+      error: error.message
+    });
+  }
+});
+
+// Update payment status
+app.patch('/api/properties/:id/payment', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { paymentStatus, paymentMethod } = req.body;
+    
+    const updates = [];
+    const values = [];
+    let paramCount = 1;
+    
+    if (paymentStatus !== undefined) {
+      updates.push(`"paymentStatus" = $${paramCount++}`);
+      values.push(paymentStatus);
+    }
+    if (paymentMethod !== undefined) {
+      updates.push(`"paymentMethod" = $${paramCount++}`);
+      values.push(paymentMethod);
+    }
+    
+    if (updates.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'No payment fields to update'
+      });
+    }
+    
+    updates.push(`"updatedAt" = CURRENT_TIMESTAMP`);
+    values.push(id);
+    
+    const query = `
+      UPDATE "Properties" 
+      SET ${updates.join(', ')}
+      WHERE "id" = $${paramCount}
+      RETURNING *
+    `;
+    
+    const result = await pool.query(query, values);
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: 'Property not found'
+      });
+    }
+    
+    res.json({
+      success: true,
+      message: 'Payment status updated successfully',
+      data: result.rows[0]
+    });
+    
+  } catch (error) {
+    console.error('❌ Update payment error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to update payment status',
+      error: error.message
+    });
+  }
+});
+
 // UTILITY ROUTES
 
 // Health check
@@ -611,7 +1035,59 @@ const createTables = async () => {
     await pool.query('CREATE INDEX IF NOT EXISTS "idx_users_email" ON "Users"("email")');
     await pool.query('CREATE INDEX IF NOT EXISTS "idx_users_accountType" ON "Users"("accountType")');
     
-    // Create trigger for updatedAt
+    // Create Properties table
+    // First check if Users table uses UUID or INTEGER for id
+    let userIdType = 'INTEGER';
+    try {
+      const colTypeResult = await pool.query(`
+        SELECT data_type 
+        FROM information_schema.columns 
+        WHERE table_name = 'Users' AND column_name = 'id'
+      `);
+      if (colTypeResult.rows.length > 0) {
+        const dataType = colTypeResult.rows[0].data_type;
+        console.log(`🔍 Detected Users.id type: ${dataType}`);
+        if (dataType === 'uuid') {
+          userIdType = 'UUID';
+        } else if (dataType === 'integer' || dataType === 'bigint' || dataType === 'smallint') {
+          userIdType = 'INTEGER';
+        }
+      }
+    } catch (checkError) {
+      console.warn('⚠️ Could not check Users id type, defaulting to INTEGER:', checkError.message);
+    }
+    
+    console.log(`🔧 Creating Properties table with landlordId type: ${userIdType}`);
+    
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS "Properties" (
+          "id" SERIAL PRIMARY KEY,
+          "landlordId" ${userIdType} NOT NULL REFERENCES "Users"("id") ON DELETE CASCADE,
+          "title" VARCHAR(200) NOT NULL,
+          "description" TEXT,
+          "location" VARCHAR(200) NOT NULL,
+          "price" DECIMAL(12, 2) NOT NULL,
+          "propertyType" VARCHAR(50) NOT NULL,
+          "bedrooms" INTEGER,
+          "bathrooms" INTEGER,
+          "area" DECIMAL(10, 2),
+          "picture" TEXT,
+          "video" TEXT,
+          "verificationDocument" TEXT,
+          "status" VARCHAR(20) NOT NULL DEFAULT 'pending' CHECK ("status" IN ('pending', 'approved', 'rejected', 'forwarded_to_council')),
+          "paymentStatus" VARCHAR(20) DEFAULT 'pending' CHECK ("paymentStatus" IN ('pending', 'paid', 'failed')),
+          "paymentMethod" VARCHAR(50),
+          "createdAt" TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          "updatedAt" TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    
+    // Create indexes for Properties
+    await pool.query('CREATE INDEX IF NOT EXISTS "idx_properties_landlordId" ON "Properties"("landlordId")');
+    await pool.query('CREATE INDEX IF NOT EXISTS "idx_properties_status" ON "Properties"("status")');
+    await pool.query('CREATE INDEX IF NOT EXISTS "idx_properties_paymentStatus" ON "Properties"("paymentStatus")');
+    
+    // Create trigger function first (if it doesn't exist)
     await pool.query(`
       CREATE OR REPLACE FUNCTION update_updated_at_column()
       RETURNS TRIGGER AS $$
@@ -620,6 +1096,15 @@ const createTables = async () => {
           RETURN NEW;
       END;
       $$ language 'plpgsql'
+    `);
+    
+    // Create trigger for Properties updatedAt
+    await pool.query(`
+      DROP TRIGGER IF EXISTS update_properties_updated_at ON "Properties";
+      CREATE TRIGGER update_properties_updated_at 
+          BEFORE UPDATE ON "Properties" 
+          FOR EACH ROW 
+          EXECUTE FUNCTION update_updated_at_column()
     `);
     
     await pool.query(`
